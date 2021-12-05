@@ -1,201 +1,209 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/msg.h>
 #include <sys/ipc.h>
 #include <sys/types.h>
-#include <sys/msg.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
-void makeMatrix(int** matrix, int x, int y);
-struct messages {
+struct msg {
     long id;
-    int entry[3][3];
+    int value[3][3];
 };
-void makeMatrix3by3(struct messages* m, int** matrix, int i, int j, int msgid) {
+
+void makeMatrix(int** matrix, int x, int y);
+
+int  makeMessageQueue(key_t ipckey, int flag) {
+    int msqid = msgget(ipckey, flag);
+    if (msqid < 0) {
+        perror("msgget()");
+        exit(0);
+    }
+    return msqid;
+}
+void setMessage3By3(struct msg* m, int** matrix, int a, int b, int msgid) {
+    m->id = msgid;
+    for (int k = 0; k < 3; k++) {
+        for (int l = 0; l < 3; l++) {
+            m->value[k][l] = matrix[a + k][b + l];
+        }
+    }
+}
+void setMessage2By2(struct msg* m, int** matrix, int a, int b, int msgid) {
+    m->id = msgid;
+    for (int c = 0; c < 3; c++) {
+        for (int d = 0; d < 3; d++) {
+            m->value[c][d] = 0;
+        }
+    }
+    for (int k = 0; k < 2; k++) {
+        for (int l = 0; l < 2; l++) {
+            m->value[k][l] = matrix[a + k][b + l];
+        }
+    }
+}
+void setMessage1By1(struct msg* m, int result, int msgid) {
     m->id = msgid;
     for (int a = 0; a < 3; a++) {
         for (int b = 0; b < 3; b++) {
-            m->entry[a][b] = matrix[i + a][j + b];
+            m->value[a][b] = 0;
         }
+    }
+    m->value[0][0] = result;
+}
+void sendMessage(int msqid, struct msg* ptr, size_t nbytes, int flag) {
+    if (msgsnd(msqid, ptr, nbytes, flag) == -1) {
+        perror("msgnd()");
+        exit(0);
     }
 }
-void makeMatrix2by2(struct messages* m, int** matrix, int i, int j, int msgid) {
-    m->id = msgid;
-    for (int a = 0; a < 3; a++) {
-        for (int b = 0; b < 3; b++) {
-            m->entry[a][b] = 0;
-        }
-    }
-    for (int a = 0; a < 2; a++) {
-        for (int b = 0; b < 2; b++) {
-            m->entry[a][b] = matrix[i + a][i + b];
-        }
+void receiveMessage(int msqid, struct msg* ptr, size_t nbytes, long type, int flag) {
+    if (msgrcv(msqid, ptr, nbytes, type, flag) == -1) {
+        perror("msgrcv()");
+        exit(0);
     }
 }
-void makeMatrix1by1(struct messages* m, int k, int msgid) {
-    m->id = msgid;
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            m->entry[i][j] = 0;
+int  convolutional(int arr[3][3]) {
+    int result = 0;
+    int filter[3][3] = { {-1,-1,-1},{-1,8,-1},{-1,-1,-1} };
+    for (int g = 0; g < 3; g++) {
+        for (int h = 0; h < 3; h++) {
+            result += arr[g][h] * filter[g][h];
         }
     }
-    m->entry[0][0] = k;
+    return result;
 }
-int Convolutional(int array[3][3]) {
-    int sum = 0;
-    int cmatrix[3][3] = { {-1,-1,-1},{-1,8,-1},{-1,-1,-1} };
-    for (int a = 0; a < 3; a++) {
-        for (int b = 0; b < 3; b++) {
-            sum += array[a][b] * cmatrix[a][b];
+int maxPooling(int arr[3][3]) {
+    int result = arr[0][0];
+    for (int c = 0; c < 2; c++) {
+        for (int d = 0; d < 2; d++) {
+            if (result < arr[c][d])result = arr[c][d];
         }
     }
-    return sum;
-}
-int Pooling(int array[3][3]) {
-    int sum = array[0][0];
-    for (int a = 0; a < 2; a++) {
-        for (int b = 0; b < 2; b++) {
-            if (sum < array[a][b])
-                sum = array[a][b];
-        }
-    }
-    return sum;
+    return result;
 }
 
 int main(int argc, char* argv[]) {
 
-    int x = atoi(argv[1]);
-    int y = atoi(argv[1]);
-
+    int size = atoi(argv[1]);
+    int x = size;
+    int y = size;
     int** matrix;
-    int** rematrix;
-    int** finalmatrix;
+    int** receive_matrix;
+    int** result_array;
+    key_t ipckey;
+    int mqdes;
+    int send_buf_len1, receive_buf_len2, send_buf_len3, receive_buf_len4;
+    struct msg send_msg1, receive_msg2, send_msg3, receive_msg4;
+    pid_t pid1[(x - 2) * (y - 2)];
+    pid_t pid2[(x - 2) * (y - 2) / 4];
+
+    send_buf_len1 = sizeof(send_msg1.value);
+    send_buf_len3 = sizeof(send_msg3.value);
+
+    receive_buf_len2 = sizeof(receive_msg2.value);
+    receive_buf_len4 = sizeof(receive_msg4.value);
+
+    ipckey = ftok("./", 2020);
+    mqdes = makeMessageQueue(ipckey, IPC_CREAT | 0600);
 
     matrix = (int**)malloc(sizeof(int*) * x);
-    for (int a = 0; a < x; a++) {
-        matrix[a] = (int*)malloc(sizeof(int*) * y);
+    for (int i = 0; i < x; i++) {
+        matrix[i] = (int*)malloc(sizeof(int) * y);
+    }
+    receive_matrix = (int**)malloc(sizeof(int*) * (x - 2));
+    for (int i = 0; i < (x - 2); i++) {
+        receive_matrix[i] = (int*)malloc(sizeof(int) * (y - 2));
+    }
+    result_array = (int**)malloc(sizeof(int*) * (x - 2) / 2);
+    for (int i = 0; i < (x - 2) / 2; i++) {
+        result_array[i] = (int*)malloc(sizeof(int) * (y - 2) / 2);
     }
 
-    rematrix = (int**)malloc(sizeof(int*) * (x - 2));
-    for (int a = 0; a < (x - 2); a++) {
-        rematrix[a] = (int*)malloc(sizeof(int) * (y - 2));
-    }
-
-    finalmatrix = (int**)malloc(sizeof(int*) * ((x - 2) / 2));
-    for (int a = 0; a < ((x - 2) / 2); a++) {
-        finalmatrix[a] = (int*)malloc(sizeof(int) * ((y - 2) / 2));
-    }
     makeMatrix(matrix, x, y);
-    struct messages sm1, sm2, rm1, rm2;
-    int sbuf_len1 = sizeof(sm1.entry);
-    int sbuf_len2 = sizeof(sm2.entry);
-    int rbuf_len1 = sizeof(rm1.entry);
-    int rbuf_len2 = sizeof(rm2.entry);
 
-    pid_t pid0[(x - 2) * (y - 2)];
-    pid_t pid1[((x - 2) * (y - 2)) / 4];
-    key_t ipckey;
-    ipckey = ftok("./", 1997);
-    int mqid = msgget(ipckey, IPC_CREAT | 0600);
-    if (mqid < 0) {
-        perror("msgget()");
-        exit(0);
-    }
-    int mqdes = mqid;
-    int msgid1 = 1;
-    int msgid2 = 1;
-    int pid3 = 0;
-    for (int a = 0; a < (x - 2); a++) {
-        for (int b = 0; b < (y - 2); b++) {
-            makeMatrix3by3(&sm1, matrix, a, b, msgid1);
-            if (msgsnd(mqdes, &sm1, sbuf_len1, 0) == -1) {
-                perror("msgsnd()");
-                exit(0);
-            }//sending
-            if ((pid0[pid3] = fork()) == 0) {
-                struct messages sm3, rm3;
-                int sbuf_len3 = sizeof(sm3.entry);
-                int rbuf_len3 = sizeof(rm3.entry);
-                if (msgrcv(mqdes, &rm3, rbuf_len3, msgid1, 0) == -1) {
-                    perror("msgrcv()");
-                    exit(0);
-                }//receiving
-                int sum = Convolutional(rm3.entry);
-                makeMatrix1by1(&sm3, sum, msgid2);
-                if (msgsnd(mqdes, &sm3, sbuf_len3, 0) == -1) {
-                    perror("msgsnd()");
-                    exit(0);
-                }//sending
+    int msg_id1 = 1;
+    int msg_id2 = 1;
+    int pid_i1 = 0;
+    for (int i = 0; i < (x - 2); i++) {
+        for (int j = 0; j < (y - 2); j++) {
+            setMessage3By3(&send_msg1, matrix, i, j, msg_id1);
+            sendMessage(mqdes, &send_msg1, send_buf_len1, 0);
+            if ((pid1[pid_i1] = fork()) == 0) {
+                struct msg receive_msg1, send_msg2;
+                int receive_buf_len1, send_buf_len2;
+                receive_buf_len1 = sizeof(receive_msg1.value);
+                send_buf_len2 = sizeof(send_msg2.value);
+
+                receiveMessage(mqdes, &receive_msg1, receive_buf_len1, msg_id1, 0);
+                int result = convolutional(receive_msg1.value);
+
+                setMessage1By1(&send_msg2, result, msg_id2);
+                sendMessage(mqdes, &send_msg2, send_buf_len2, 0);
+
                 exit(1);
             }
-            waitpid(pid0[pid3], NULL, 0);
-            if (msgrcv(mqdes, &rm1, rbuf_len1, msgid2, 0) == -1) {
-                perror("msgrcv()");
-                exit(0);
-            }//receiving
-            rematrix[a][b] = rm1.entry[0][0];;
-            pid3++;
-            msgid1++;
-            msgid2++;
+            waitpid(pid1[pid_i1], NULL, 0);
+            receiveMessage(mqdes, &receive_msg2, receive_buf_len2, msg_id2, 0);
+            receive_matrix[i][j] = receive_msg2.value[0][0];
+            msg_id1++;
+            msg_id2++;
+            pid_i1++;
         }
     }
 
-    int msgid3 = 1;
-    int msgid4 = 1;
-    int pid4 = 0;
-    for (int a = 0; a < (x - 2); a += 2) {
-        for (int b = 0; b < (y - 2); b += 2) {
-            makeMatrix2by2(&sm2, rematrix, a, b, msgid3);
-            if (msgsnd(mqdes, &sm2, sbuf_len2, 0) == -1) {
-                perror("msgsnd()");
-                exit(0);
-            }//sending
-            if ((pid1[pid4] = fork()) == 0) {
-                struct messages sm4, rm4;
-                int sbuf_len4 = sizeof(sm4.entry);
-                int rbuf_len4 = sizeof(rm4.entry);
-                if (msgrcv(mqdes, &rm4, rbuf_len4, msgid3, 0) == -1) {
-                    perror("msgrcv()");
-                    exit(0);
-                }//receiving       
-                int sum = Pooling(rm4.entry);
-                makeMatrix1by1(&sm4, sum, msgid4);
-                if (msgsnd(mqdes, &sm4, sbuf_len4, 0) == -1) {
-                    perror("msgsnd()");
-                    exit(0);
-                }//sending
+    int msg_id3 = 1;
+    int pid_i2 = 0;
+    int msg_id4 = 1;
+    for (int i = 0; i < (x - 2); i += 2) {
+        for (int j = 0; j < (y - 2); j += 2) {
+            setMessage2By2(&send_msg3, receive_matrix, i, j, msg_id3);
+            sendMessage(mqdes, &send_msg3, send_buf_len3, 0);
+            if ((pid2[pid_i2] = fork()) == 0) {
+                struct msg receive_msg3, send_msg4;
+                int receive_buf_len3, send_buf_len4;
+                receive_buf_len3 = sizeof(receive_msg3.value);
+                send_buf_len4 = sizeof(send_msg4.value);
+
+                receiveMessage(mqdes, &receive_msg3, receive_buf_len3, msg_id3, 0);
+
+                int result = maxPooling(receive_msg3.value);
+
+                setMessage1By1(&send_msg4, result, msg_id4);
+                sendMessage(mqdes, &send_msg4, send_buf_len4, 0);
+
                 exit(1);
             }
-            waitpid(pid1[pid4], NULL, 0);
-            if (msgrcv(mqdes, &rm2, rbuf_len2, msgid4, 0) == -1) {
-                perror("msgrcv()");
-                exit(0);
-            }//receiving
-            finalmatrix[(a / 2)][(b / 2)] = rm2.entry[0][0];
-            pid4++;
-            msgid3++;
-            msgid4++;
+            waitpid(pid2[pid_i2], NULL, 0);
+            receiveMessage(mqdes, &receive_msg4, receive_buf_len4, msg_id4, 0);
+            result_array[(i / 2)][(j / 2)] = receive_msg4.value[0][0];
+            msg_id3++;
+            msg_id4++;
+            pid_i2++;
         }
     }
 
-    for (int a = 0; a < ((x - 2) / 2); a++) {
-        for (int b = 0; b < ((y - 2) / 2); b++) {
-            printf("%d ", finalmatrix[a][b]);
+    for (int i = 0; i < (x - 2) / 2; i++) {
+        for (int j = 0; j < (y - 2) / 2; j++) {
+            printf("%d ", result_array[i][j]);
         }
     }
-    for (int a = 0; a < x; a++) {
-        free(matrix[a]);
+
+    for (int i = 0; i < x; i++) {
+        free(matrix[i]);
     }
     free(matrix);
-    for (int a = 0; a < (x - 2); a++) {
-        free(rematrix[a]);
+    for (int i = 0; i < (x - 2); i++) {
+        free(receive_matrix[i]);
     }
-    free(rematrix);
-    for (int a = 0; a < ((x - 2) / 2); a++) {
-        free(finalmatrix[a]);
+    free(receive_matrix);
+    for (int i = 0; i < (x - 2) / 2; i++) {
+        free(result_array[i]);
     }
-    free(finalmatrix);
+    free(result_array);
+
     msgctl(mqdes, IPC_RMID, 0);
 
     return 0;
+
 }
